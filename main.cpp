@@ -3,7 +3,7 @@
 #include <algorithm>
 
 const char DATA_FILE[] = "data.bin";
-const int MAX_ENTRIES = 1000;
+const int MAX_ENTRIES = 10000;
 
 struct Entry {
     char index[65];
@@ -69,12 +69,12 @@ public:
                             break;
                         }
                     }
-                    if (pos == -1) {
+                    if (pos == -1 && count < MAX_ENTRIES) {
                         // Add new
                         values[count] = entry.value;
                         exists[count] = true;
                         count++;
-                    } else if (!exists[pos]) {
+                    } else if (pos >= 0 && !exists[pos]) {
                         // Re-add deleted entry
                         exists[pos] = true;
                     }
