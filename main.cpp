@@ -2,80 +2,16 @@
 #include <cstring>
 #include <algorithm>
 
-const int BLOCK_SIZE = 500;
-const int MAX_BLOCKS = 250;
 const char DATA_FILE[] = "data.bin";
+const int MAX_ENTRIES = 1000;
 
 struct Entry {
     char index[65];
     int value;
-    
-    bool operator<(const Entry& other) const {
-        int cmp = strcmp(index, other.index);
-        if (cmp != 0) return cmp < 0;
-        return value < other.value;
-    }
-    
-    bool operator==(const Entry& other) const {
-        return strcmp(index, other.index) == 0 && value == other.value;
-    }
-};
-
-struct BlockHeader {
-    int size;
+    char deleted;
 };
 
 class FileDatabase {
-private:
-    
-    int get_num_blocks() {
-        FILE* fp = fopen(DATA_FILE, "rb");
-        if (!fp) return 0;
-        int n;
-        fread(&n, sizeof(int), 1, fp);
-        fclose(fp);
-        return n;
-    }
-    
-    void read_all_data(Entry* all_entries, int& total_count) {
-        FILE* fp = fopen(DATA_FILE, "rb");
-        if (!fp) {
-            total_count = 0;
-            return;
-        }
-        
-        int num_blocks;
-        fread(&num_blocks, sizeof(int), 1, fp);
-        
-        total_count = 0;
-        for (int i = 0; i < num_blocks; i++) {
-            BlockHeader header;
-            fread(&header, sizeof(BlockHeader), 1, fp);
-            fread(&all_entries[total_count], sizeof(Entry), header.size, fp);
-            total_count += header.size;
-        }
-        fclose(fp);
-    }
-    
-    void write_all_data(Entry* all_entries, int total_count) {
-        // Organize into blocks
-        int num_blocks = (total_count + BLOCK_SIZE - 1) / BLOCK_SIZE;
-        
-        FILE* fp = fopen(DATA_FILE, "wb");
-        fwrite(&num_blocks, sizeof(int), 1, fp);
-        
-        for (int i = 0; i < num_blocks; i++) {
-            int start = i * BLOCK_SIZE;
-            int block_size = (i == num_blocks - 1) ? (total_count - start) : BLOCK_SIZE;
-            
-            BlockHeader header;
-            header.size = block_size;
-            fwrite(&header, sizeof(BlockHeader), 1, fp);
-            fwrite(&all_entries[start], sizeof(Entry), block_size, fp);
-        }
-        fclose(fp);
-    }
-    
 public:
     FileDatabase() {
     }
@@ -84,46 +20,29 @@ public:
     }
     
     void insert(const char* idx, int val) {
-        Entry* all_entries = new Entry[MAX_BLOCKS * BLOCK_SIZE];
-        int total_count;
-        read_all_data(all_entries, total_count);
+        // Append insert record
+        FILE* fp = fopen(DATA_FILE, "ab");
+        if (!fp) fp = fopen(DATA_FILE, "wb");
         
-        // Check for duplicates
-        for (int i = 0; i < total_count; i++) {
-            if (strcmp(all_entries[i].index, idx) == 0 && all_entries[i].value == val) {
-                delete[] all_entries;
-                return; // Already exists
-            }
-        }
-        
-        // Add new entry
-        strcpy(all_entries[total_count].index, idx);
-        all_entries[total_count].value = val;
-        total_count++;
-        
-        write_all_data(all_entries, total_count);
-        delete[] all_entries;
+        Entry entry;
+        strcpy(entry.index, idx);
+        entry.value = val;
+        entry.deleted = 0;
+        fwrite(&entry, sizeof(Entry), 1, fp);
+        fclose(fp);
     }
     
     void remove(const char* idx, int val) {
-        Entry* all_entries = new Entry[MAX_BLOCKS * BLOCK_SIZE];
-        int total_count;
-        read_all_data(all_entries, total_count);
+        // Append delete record
+        FILE* fp = fopen(DATA_FILE, "ab");
+        if (!fp) return;
         
-        // Find and remove
-        for (int i = 0; i < total_count; i++) {
-            if (strcmp(all_entries[i].index, idx) == 0 && all_entries[i].value == val) {
-                // Shift left
-                for (int j = i; j < total_count - 1; j++) {
-                    all_entries[j] = all_entries[j + 1];
-                }
-                total_count--;
-                write_all_data(all_entries, total_count);
-                delete[] all_entries;
-                return;
-            }
-        }
-        delete[] all_entries;
+        Entry entry;
+        strcpy(entry.index, idx);
+        entry.value = val;
+        entry.deleted = 1;
+        fwrite(&entry, sizeof(Entry), 1, fp);
+        fclose(fp);
     }
     
     void find(const char* idx) {
@@ -133,26 +52,53 @@ public:
             return;
         }
         
-        int num_blocks;
-        fread(&num_blocks, sizeof(int), 1, fp);
+        // Build state by replaying log
+        bool exists[MAX_ENTRIES];
+        int values[MAX_ENTRIES];
+        int count = 0;
         
-        int results[10000];
-        int res_count = 0;
-        
-        for (int i = 0; i < num_blocks; i++) {
-            BlockHeader header;
-            fread(&header, sizeof(BlockHeader), 1, fp);
-            
-            Entry entries[BLOCK_SIZE];
-            fread(entries, sizeof(Entry), header.size, fp);
-            
-            for (int j = 0; j < header.size; j++) {
-                if (strcmp(entries[j].index, idx) == 0) {
-                    results[res_count++] = entries[j].value;
+        Entry entry;
+        while (fread(&entry, sizeof(Entry), 1, fp) == 1) {
+            if (strcmp(entry.index, idx) == 0) {
+                if (entry.deleted == 0) {
+                    // Check if already in list
+                    int pos = -1;
+                    for (int i = 0; i < count; i++) {
+                        if (values[i] == entry.value) {
+                            pos = i;
+                            break;
+                        }
+                    }
+                    if (pos == -1) {
+                        // Add new
+                        values[count] = entry.value;
+                        exists[count] = true;
+                        count++;
+                    } else if (!exists[pos]) {
+                        // Re-add deleted entry
+                        exists[pos] = true;
+                    }
+                } else {
+                    // Mark as deleted
+                    for (int i = 0; i < count; i++) {
+                        if (values[i] == entry.value) {
+                            exists[i] = false;
+                            break;
+                        }
+                    }
                 }
             }
         }
         fclose(fp);
+        
+        // Collect results
+        int results[MAX_ENTRIES];
+        int res_count = 0;
+        for (int i = 0; i < count; i++) {
+            if (exists[i]) {
+                results[res_count++] = values[i];
+            }
+        }
         
         if (res_count == 0) {
             printf("null\n");
