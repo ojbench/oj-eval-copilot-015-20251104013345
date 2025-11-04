@@ -4,6 +4,7 @@
 
 const char DATA_FILE[] = "data.bin";
 const int MAX_ENTRIES = 10000;
+const int COMPACT_THRESHOLD = 5000; // Compact after 5000 operations
 
 struct Entry {
     char index[65];
@@ -12,8 +13,57 @@ struct Entry {
 };
 
 class FileDatabase {
+private:
+    int operation_count;
+    
+    void compact() {
+        FILE* fp = fopen(DATA_FILE, "rb");
+        if (!fp) return;
+        
+        // Read all entries and build final state
+        Entry final_entries[MAX_ENTRIES];
+        int final_count = 0;
+        
+        Entry entry;
+        while (fread(&entry, sizeof(Entry), 1, fp) == 1) {
+            if (entry.deleted == 0) {
+                // Check if already exists
+                bool found = false;
+                for (int i = 0; i < final_count; i++) {
+                    if (strcmp(final_entries[i].index, entry.index) == 0 &&
+                        final_entries[i].value == entry.value) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found && final_count < MAX_ENTRIES) {
+                    final_entries[final_count++] = entry;
+                }
+            } else {
+                // Remove if exists
+                for (int i = 0; i < final_count; i++) {
+                    if (strcmp(final_entries[i].index, entry.index) == 0 &&
+                        final_entries[i].value == entry.value) {
+                        // Shift left
+                        for (int j = i; j < final_count - 1; j++) {
+                            final_entries[j] = final_entries[j + 1];
+                        }
+                        final_count--;
+                        break;
+                    }
+                }
+            }
+        }
+        fclose(fp);
+        
+        // Write compacted data
+        fp = fopen(DATA_FILE, "wb");
+        fwrite(final_entries, sizeof(Entry), final_count, fp);
+        fclose(fp);
+    }
+    
 public:
-    FileDatabase() {
+    FileDatabase() : operation_count(0) {
     }
     
     ~FileDatabase() {
@@ -30,6 +80,12 @@ public:
         entry.deleted = 0;
         fwrite(&entry, sizeof(Entry), 1, fp);
         fclose(fp);
+        
+        operation_count++;
+        if (operation_count >= COMPACT_THRESHOLD) {
+            compact();
+            operation_count = 0;
+        }
     }
     
     void remove(const char* idx, int val) {
@@ -43,6 +99,12 @@ public:
         entry.deleted = 1;
         fwrite(&entry, sizeof(Entry), 1, fp);
         fclose(fp);
+        
+        operation_count++;
+        if (operation_count >= COMPACT_THRESHOLD) {
+            compact();
+            operation_count = 0;
+        }
     }
     
     void find(const char* idx) {
