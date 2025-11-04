@@ -2,79 +2,128 @@
 #include <cstring>
 #include <algorithm>
 
+const int BLOCK_SIZE = 500;
+const int MAX_BLOCKS = 250;
 const char DATA_FILE[] = "data.bin";
-const int MAX_BUFFER = 1000;
 
 struct Entry {
     char index[65];
     int value;
-    char deleted; // 0 = active, 1 = deleted
     
     bool operator<(const Entry& other) const {
         int cmp = strcmp(index, other.index);
         if (cmp != 0) return cmp < 0;
         return value < other.value;
     }
+    
+    bool operator==(const Entry& other) const {
+        return strcmp(index, other.index) == 0 && value == other.value;
+    }
+};
+
+struct BlockHeader {
+    int size;
 };
 
 class FileDatabase {
 private:
-    int operation_count;
+    
+    int get_num_blocks() {
+        FILE* fp = fopen(DATA_FILE, "rb");
+        if (!fp) return 0;
+        int n;
+        fread(&n, sizeof(int), 1, fp);
+        fclose(fp);
+        return n;
+    }
+    
+    void read_all_data(Entry* all_entries, int& total_count) {
+        FILE* fp = fopen(DATA_FILE, "rb");
+        if (!fp) {
+            total_count = 0;
+            return;
+        }
+        
+        int num_blocks;
+        fread(&num_blocks, sizeof(int), 1, fp);
+        
+        total_count = 0;
+        for (int i = 0; i < num_blocks; i++) {
+            BlockHeader header;
+            fread(&header, sizeof(BlockHeader), 1, fp);
+            fread(&all_entries[total_count], sizeof(Entry), header.size, fp);
+            total_count += header.size;
+        }
+        fclose(fp);
+    }
+    
+    void write_all_data(Entry* all_entries, int total_count) {
+        // Organize into blocks
+        int num_blocks = (total_count + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        
+        FILE* fp = fopen(DATA_FILE, "wb");
+        fwrite(&num_blocks, sizeof(int), 1, fp);
+        
+        for (int i = 0; i < num_blocks; i++) {
+            int start = i * BLOCK_SIZE;
+            int block_size = (i == num_blocks - 1) ? (total_count - start) : BLOCK_SIZE;
+            
+            BlockHeader header;
+            header.size = block_size;
+            fwrite(&header, sizeof(BlockHeader), 1, fp);
+            fwrite(&all_entries[start], sizeof(Entry), block_size, fp);
+        }
+        fclose(fp);
+    }
     
 public:
-    FileDatabase() : operation_count(0) {
+    FileDatabase() {
     }
     
     ~FileDatabase() {
     }
     
     void insert(const char* idx, int val) {
-        // Check if already exists
-        FILE* fp = fopen(DATA_FILE, "rb");
-        if (fp) {
-            Entry entry;
-            while (fread(&entry, sizeof(Entry), 1, fp) == 1) {
-                if (strcmp(entry.index, idx) == 0 && entry.value == val && entry.deleted == 0) {
-                    fclose(fp);
-                    return; // Already exists
-                }
+        Entry* all_entries = new Entry[MAX_BLOCKS * BLOCK_SIZE];
+        int total_count;
+        read_all_data(all_entries, total_count);
+        
+        // Check for duplicates
+        for (int i = 0; i < total_count; i++) {
+            if (strcmp(all_entries[i].index, idx) == 0 && all_entries[i].value == val) {
+                delete[] all_entries;
+                return; // Already exists
             }
-            fclose(fp);
         }
         
-        // Append new entry
-        fp = fopen(DATA_FILE, "ab");
-        Entry entry;
-        strcpy(entry.index, idx);
-        entry.value = val;
-        entry.deleted = 0;
-        fwrite(&entry, sizeof(Entry), 1, fp);
-        fclose(fp);
+        // Add new entry
+        strcpy(all_entries[total_count].index, idx);
+        all_entries[total_count].value = val;
+        total_count++;
         
-        operation_count++;
-        if (operation_count >= 500) {
-            compact();
-            operation_count = 0;
-        }
+        write_all_data(all_entries, total_count);
+        delete[] all_entries;
     }
     
     void remove(const char* idx, int val) {
-        // Mark as deleted by appending a deletion marker
-        FILE* fp = fopen(DATA_FILE, "ab");
-        if (!fp) return;
+        Entry* all_entries = new Entry[MAX_BLOCKS * BLOCK_SIZE];
+        int total_count;
+        read_all_data(all_entries, total_count);
         
-        Entry entry;
-        strcpy(entry.index, idx);
-        entry.value = val;
-        entry.deleted = 1;
-        fwrite(&entry, sizeof(Entry), 1, fp);
-        fclose(fp);
-        
-        operation_count++;
-        if (operation_count >= 500) {
-            compact();
-            operation_count = 0;
+        // Find and remove
+        for (int i = 0; i < total_count; i++) {
+            if (strcmp(all_entries[i].index, idx) == 0 && all_entries[i].value == val) {
+                // Shift left
+                for (int j = i; j < total_count - 1; j++) {
+                    all_entries[j] = all_entries[j + 1];
+                }
+                total_count--;
+                write_all_data(all_entries, total_count);
+                delete[] all_entries;
+                return;
+            }
         }
+        delete[] all_entries;
     }
     
     void find(const char* idx) {
@@ -84,99 +133,37 @@ public:
             return;
         }
         
-        // Use an array to track active entries
-        int values[MAX_BUFFER];
-        int count = 0;
+        int num_blocks;
+        fread(&num_blocks, sizeof(int), 1, fp);
         
-        Entry entry;
-        while (fread(&entry, sizeof(Entry), 1, fp) == 1) {
-            if (strcmp(entry.index, idx) == 0) {
-                if (entry.deleted == 0) {
-                    // Add to results if not already there
-                    bool found = false;
-                    for (int i = 0; i < count; i++) {
-                        if (values[i] == entry.value) {
-                            found = true;
-                            break;
-                        }
-                    }
-                    if (!found && count < MAX_BUFFER) {
-                        values[count++] = entry.value;
-                    }
-                } else {
-                    // Remove from results
-                    for (int i = 0; i < count; i++) {
-                        if (values[i] == entry.value) {
-                            for (int j = i; j < count - 1; j++) {
-                                values[j] = values[j + 1];
-                            }
-                            count--;
-                            break;
-                        }
-                    }
+        int results[10000];
+        int res_count = 0;
+        
+        for (int i = 0; i < num_blocks; i++) {
+            BlockHeader header;
+            fread(&header, sizeof(BlockHeader), 1, fp);
+            
+            Entry entries[BLOCK_SIZE];
+            fread(entries, sizeof(Entry), header.size, fp);
+            
+            for (int j = 0; j < header.size; j++) {
+                if (strcmp(entries[j].index, idx) == 0) {
+                    results[res_count++] = entries[j].value;
                 }
             }
         }
         fclose(fp);
         
-        if (count == 0) {
+        if (res_count == 0) {
             printf("null\n");
         } else {
-            std::sort(values, values + count);
-            for (int i = 0; i < count; i++) {
+            std::sort(results, results + res_count);
+            for (int i = 0; i < res_count; i++) {
                 if (i > 0) printf(" ");
-                printf("%d", values[i]);
+                printf("%d", results[i]);
             }
             printf("\n");
         }
-    }
-    
-    void compact() {
-        FILE* fp = fopen(DATA_FILE, "rb");
-        if (!fp) return;
-        
-        // Read all entries
-        Entry entries[MAX_BUFFER];
-        int count = 0;
-        Entry entry;
-        
-        while (fread(&entry, sizeof(Entry), 1, fp) == 1 && count < MAX_BUFFER) {
-            if (entry.deleted == 0) {
-                // Check if this entry is later deleted
-                bool is_deleted = false;
-                long pos = ftell(fp);
-                Entry later;
-                while (fread(&later, sizeof(Entry), 1, fp) == 1) {
-                    if (strcmp(later.index, entry.index) == 0 && 
-                        later.value == entry.value && later.deleted == 1) {
-                        is_deleted = true;
-                        break;
-                    }
-                }
-                fseek(fp, pos, SEEK_SET);
-                
-                if (!is_deleted) {
-                    // Check if already in array (duplicates)
-                    bool found = false;
-                    for (int i = 0; i < count; i++) {
-                        if (strcmp(entries[i].index, entry.index) == 0 && 
-                            entries[i].value == entry.value) {
-                            found = true;
-                            break;
-                        }
-                    }
-                    if (!found) {
-                        entries[count++] = entry;
-                    }
-                }
-            }
-        }
-        fclose(fp);
-        
-        // Write back compacted data
-        fp = fopen(DATA_FILE, "wb");
-        fwrite(entries, sizeof(Entry), count, fp);
-        fclose(fp);
     }
 };
 
